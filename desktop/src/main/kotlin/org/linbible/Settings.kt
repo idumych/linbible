@@ -38,6 +38,15 @@ data class DisplaySettings(
     var nightBackground: Int = -15592942, // #121212
     var nightTextColor: Int = -1842205,   // #E3E3E3
     var bookmarksHideLabels: List<String> = emptyList(),
+    var showReadingProgress: Boolean = false,
+    var showMarkAsReadButton: Boolean = true,
+    var showMemorizationIndicators: Boolean = true,
+    var autoTrackReading: Boolean = false,
+    var showAiDocMarkers: Boolean = true,
+    var dayBackgroundImage: String? = null,
+    var nightBackgroundImage: String? = null,
+    var dayBackgroundImageOpacity: Int = 100,
+    var nightBackgroundImageOpacity: Int = 100,
 ) {
     fun toConfigJson(): JsonObject = buildJsonObject {
         put("fontSize", fontSize)
@@ -64,10 +73,11 @@ data class DisplaySettings(
         put("topMargin", 0)
         put("infiniteScroll", true)
         put("showPageNumber", false)
-        put("showReadingProgress", false)
-        put("showMarkAsReadButton", false)
-        put("showMemorizationIndicators", false)
-        put("autoTrackReading", false)
+        put("showReadingProgress", showReadingProgress)
+        put("showMarkAsReadButton", showMarkAsReadButton)
+        put("showMemorizationIndicators", showMemorizationIndicators)
+        put("autoTrackReading", autoTrackReading)
+        put("showAiDocMarkers", showAiDocMarkers)
         put("showPageButtons", false)
         strs("bookmarksHideLabels", bookmarksHideLabels)
         strs("bookmarksAssignLabels", emptyList())
@@ -83,10 +93,10 @@ data class DisplaySettings(
             put("nightBackground", nightBackground)
             put("nightNoise", 0)
             put("nightTextColor", nightTextColor)
-            str("dayBackgroundImage", null)
-            str("nightBackgroundImage", null)
-            put("dayBackgroundImageOpacity", 100)
-            put("nightBackgroundImageOpacity", 100)
+            str("dayBackgroundImage", dayBackgroundImage?.takeIf { it in Addons.backgroundImages })
+            str("nightBackgroundImage", nightBackgroundImage?.takeIf { it in Addons.backgroundImages })
+            put("dayBackgroundImageOpacity", dayBackgroundImageOpacity)
+            put("nightBackgroundImageOpacity", nightBackgroundImageOpacity)
         })
     }
 }
@@ -120,9 +130,22 @@ data class AppState(
     var lastStrongsHebrew: String? = null,
     var verticalSplit: Boolean = false,
     var uiScale: Double? = null,
+    var readingPlan: String? = null,
+    /** Cloud sync: enabled databases (DbCategory names) and the Nextcloud/WebDAV account. */
+    var syncEnabled: Map<String, Boolean> = emptyMap(),
+    var syncServerUrl: String? = null,
+    var syncUsername: String? = null,
+    var syncFolderPath: String? = null,
+    var syncAutomatically: Boolean = true,
+    var lastSynchronized: Long = 0,
+    /** Miscellaneous settings of compiled AndBible code (CommonUtils.settings). */
+    var extra: Map<String, String> = emptyMap(),
 )
 
 object Settings {
+    fun isSyncEnabled(c: DbCategory) = state.syncEnabled[c.name] == true
+    fun setSyncEnabled(c: DbCategory, on: Boolean) { state.syncEnabled = state.syncEnabled + (c.name to on); save() }
+
     private val file = File(AppDirs.config, "state.json")
     var state = AppState()
 

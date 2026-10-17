@@ -49,7 +49,8 @@ class DisplaySettingsDialog(private val app: MainApp) {
         }
 
         val fonts = ComboBox<String>().apply {
-            items.setAll(listOf("sans-serif", "serif", "monospace") + Font.getFamilies())
+            // AndBible add-on fonts first (served to BibleView from the add-on modules), then generic and system fonts
+            items.setAll(Addons.fonts.keys.sorted() + listOf("sans-serif", "serif", "monospace") + Font.getFamilies())
             value = d.fontFamily
             isEditable = false
             setOnAction { d.fontFamily = value; changed() }
@@ -83,6 +84,20 @@ class DisplaySettingsDialog(private val app: MainApp) {
         color("Day text", { d.dayTextColor }) { d.dayTextColor = it }
         color("Night background", { d.nightBackground }) { d.nightBackground = it }
         color("Night text", { d.nightTextColor }) { d.nightTextColor = it }
+        // Background images from add-on modules (or installed with Library → Install from file)
+        fun background(label: String, get: () -> String?, set: (String?) -> Unit) {
+            val none = "(none)"
+            val box = ComboBox<String>().apply {
+                items.setAll(listOf(none) + Addons.backgroundImages.keys.sorted())
+                value = get()?.takeIf { it in items } ?: none
+                setOnAction { set(value?.takeIf { it != none }); changed() }
+            }
+            grid.addRow(row++, Label(label), box)
+        }
+        background("Day background image", { d.dayBackgroundImage }) { d.dayBackgroundImage = it }
+        spinner("Day image opacity (%)", 0, 100, { d.dayBackgroundImageOpacity }) { d.dayBackgroundImageOpacity = it }
+        background("Night background image", { d.nightBackgroundImage }) { d.nightBackgroundImage = it }
+        spinner("Night image opacity (%)", 0, 100, { d.nightBackgroundImageOpacity }) { d.nightBackgroundImageOpacity = it }
         val night = CheckBox("Night mode").apply { isSelected = app.nightMode }
         night.selectedProperty().addListener { _, _, v -> app.setNightMode(v) }
         grid.add(night, 0, row++, 2, 1)
@@ -105,27 +120,29 @@ class KeyChooserDialog(private val app: MainApp, private val window: BibleWindow
         stage.initOwner(app.stage)
         stage.title = "${book.name} — index"
         val filter = TextField().apply { promptText = "Filter" }
-        val list = ListView<Key>()
-        val all = KeyNavigation.keys(book)
-        val isGenBook = book.bookCategory == org.crosswire.jsword.book.BookCategory.GENERAL_BOOK
+        // EPUB books are listed by their table of contents (entries may point inside a fragment)
+        val list = ListView<Pair<Key, String?>>()
+        val all: List<Pair<Key, String?>> = Epub.state(book)?.tocKeys?.takeIf { it.isNotEmpty() }
+            ?: KeyNavigation.keys(book).map { it to null }
+        val isGenBook = book.bookCategory == org.crosswire.jsword.book.BookCategory.GENERAL_BOOK && !Epub.isEpub(book)
         list.setCellFactory {
-            object : ListCell<Key>() {
-                override fun updateItem(item: Key?, empty: Boolean) {
+            object : ListCell<Pair<Key, String?>>() {
+                override fun updateItem(item: Pair<Key, String?>?, empty: Boolean) {
                     super.updateItem(item, empty)
-                    text = item?.let { if (isGenBook) "    ".repeat(KeyNavigation.depth(it)) + it.name else it.name }
+                    text = item?.first?.let { if (isGenBook) "    ".repeat(KeyNavigation.depth(it)) + it.name else it.name }
                 }
             }
         }
         fun apply() {
             val f = filter.text.trim().lowercase()
-            list.items.setAll(if (f.isEmpty()) all else all.filter { it.name.lowercase().contains(f) }.sortedBy { !it.name.lowercase().startsWith(f) })
+            list.items.setAll(if (f.isEmpty()) all else all.filter { it.first.name.lowercase().contains(f) }.sortedBy { !it.first.name.lowercase().startsWith(f) })
         }
         filter.textProperty().addListener { _, _, _ -> apply() }
         apply()
-        (window.page as? Page.Keyed)?.key?.let { k -> list.selectionModel.select(k); list.scrollTo(k) }
+        (window.page as? Page.Keyed)?.key?.let { k -> list.items.firstOrNull { it.first == k }?.let { list.selectionModel.select(it); list.scrollTo(it) } }
         fun choose() {
-            val k = list.selectionModel.selectedItem ?: return
-            app.navigate(window, Page.Keyed(book, k))
+            val (k, htmlId) = list.selectionModel.selectedItem ?: return
+            app.navigate(window, Page.Keyed(book, k, htmlId = htmlId))
             stage.close()
         }
         list.setOnMouseClicked { if (it.clickCount == 2) choose() }

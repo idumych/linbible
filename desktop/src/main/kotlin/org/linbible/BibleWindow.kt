@@ -46,9 +46,11 @@ class BibleWindow(
     initialPage: Page,
     var synchronized: Boolean = true,
     val isLinksWindow: Boolean = false,
-) : BookmarkListener {
+) : BookmarkListener, ProgressListener {
     var page: Page = initialPage
         private set
+    /** Stable id for AndBible's window API (AI tools). */
+    val windowId: net.bible.android.database.IdType = net.bible.android.database.IdType()
 
     val webView = WebView()
     private val engine = webView.engine
@@ -116,6 +118,13 @@ class BibleWindow(
         }
         engine.setOnAlert { Log.i("JS alert: ${it.data}") }
         Bookmarks.addListener(this)
+        Progress.addListener(this)
+        // Layout-dependent overlays (memorization indicators) are recomputed on set_config, as on Android
+        // where resizing a window re-sends the configuration.
+        val resized = javafx.animation.PauseTransition(javafx.util.Duration.millis(400.0)).apply {
+            setOnFinished { if (clientReady && !disposed) updateConfig() }
+        }
+        webView.widthProperty().addListener { _, _, _ -> resized.playFromStart() }
         loadFrontend()
         show(initialPage)
     }
@@ -125,7 +134,10 @@ class BibleWindow(
         labelsUploaded = false
         val lang = Locale.getDefault().toLanguageTag()
         val rtl = false
-        engine.load("${AssetServer.baseUrl}/index.html?lang=$lang&fontModuleNames=&styleModuleNames=&featureModuleNames=&rtl=$rtl&night=${app.nightMode}")
+        val enc = { l: List<String> -> java.net.URLEncoder.encode(l.joinToString(","), Charsets.UTF_8) }
+        engine.load("${AssetServer.baseUrl}/index.html?lang=$lang&fontModuleNames=${enc(Addons.fontModuleNames)}" +
+            "&styleModuleNames=${enc(Addons.styleModuleNames)}&featureModuleNames=${enc(Addons.featureModuleNames)}" +
+            "&rtl=$rtl&night=${app.nightMode}")
     }
 
     private fun boot() {
@@ -187,6 +199,7 @@ class BibleWindow(
     private val docV11n get() = when (val p = page) {
         is Page.Bible -> p.book.versification
         is Page.MyNotes -> KJVA
+        is Page.Memorize -> p.range.versification
         else -> null
     }
 
@@ -207,8 +220,8 @@ class BibleWindow(
             strs("hideCompareDocuments", s.hideCompareDocuments)
             bool("limitAmbiguousModalSize", false)
             str("windowId", "w${System.identityHashCode(this)}")
-            strs("disableBibleModalButtons", listOf("MEMORIZE", "ADD_MEMORIZATION_TARGET", "REMOVE_MEMORIZATION_TARGET", "LLM_ACTION"))
-            strs("disableGenericModalButtons", listOf("LLM_ACTION"))
+            strs("disableBibleModalButtons", if (Llm.configured) emptyList() else listOf("LLM_ACTION"))
+            strs("disableGenericModalButtons", if (Llm.configured) emptyList() else listOf("LLM_ACTION"))
             bool("monochromeMode", false)
             bool("einkMode", false)
             bool("colorEinkMode", false)
@@ -216,7 +229,7 @@ class BibleWindow(
             num("fontSizeMultiplier", 1.0)
             strs("enabledExperimentalFeatures", emptyList())
             bool("disableClickToEdit", false)
-            bool("llmConfigured", false)
+            bool("llmConfigured", Llm.configured)
             str("notesContentType", "HTML")
         }
         val payload = buildJsonObject {
@@ -241,7 +254,11 @@ class BibleWindow(
     // ------------------------------------------------------------------ page loading
 
     /** Shows [newPage]. Document building happens on a worker thread. */
+    /** Frontend state of the current document (memorize mode progress), see JsBridge.saveState. */
+    var jsState: String? = null
+
     fun show(newPage: Page) {
+        if (newPage != page) jsState = null
         page = newPage
         titleLabel.text = newPage.title
         val gen = ++generation
@@ -286,7 +303,8 @@ class BibleWindow(
         }
         is Page.Keyed -> {
             firstKey = p.key; lastKey = p.key
-            Initial(Documents.osis(p.book, p.key, p.highlight), jumpToAnchor = p.highlight?.first, highlight = p.highlight)
+            Initial(Documents.osis(p.book, p.key, p.highlight), jumpToAnchor = p.highlight?.first, highlight = p.highlight,
+                jumpToId = p.htmlId?.takeIf { p.highlight == null })
         }
         is Page.Multi -> Initial(Documents.multi(p.items, p.compare))
         is Page.StudyPad -> {
@@ -294,6 +312,7 @@ class BibleWindow(
             Initial(Documents.studyPad(label), jumpToId = p.entryId?.let { "o-${abs(it.hashCode())}" })
         }
         is Page.MyNotes -> Initial(Documents.myNotes(p.range))
+        is Page.Memorize -> Initial(Documents.memorize(p.book, p.range, jsState))
         is Page.Message -> Initial(Documents.error(p.text))
     }
 
@@ -552,9 +571,22 @@ class BibleWindow(
                 menu.items += item("Copy verses with reference") { range?.let { app.copyVerses(sel.swordBook!!, it) } }
                 menu.items += item("Compare translations") { range?.let { app.openCompare(it) } }
                 menu.items += item("My notes for this chapter") { range?.let { app.openMyNotes(it.start) } }
+                menu.items += item("Memorize") {
+                    range?.let { Progress.addTargetIfNeeded(it); app.openMemorize(sel.swordBook!!, it, this) }
+                }
             }
             if (sel.bookmarks.isNotEmpty()) {
                 menu.items += item("Remove bookmarks in selection") { Bookmarks.delete(sel.bookmarks) }
+            }
+        }
+        if (sel is Selection && Llm.configured) {
+            menu.items += SeparatorMenuItem()
+            menu.items += item("Ask AI…") {
+                val book = sel.book ?: return@item
+                val s = if (sel.osisRef != null) net.bible.android.view.activity.page.Selection(book.initials, sel.osisRef, sel.startOrdinal, sel.endOrdinal, sel.text)
+                    else net.bible.android.view.activity.page.Selection(book.initials, sel.startOrdinal, sel.endOrdinal, sel.text)
+                Ai.showPromptSelector(s, net.bible.service.llm.PromptContext.VERSE_SELECTION,
+                    page.category?.let { runCatching { net.bible.android.control.page.DocumentCategory.valueOf(it.name) }.getOrNull() })
             }
         }
         if (text.isNotEmpty()) {
@@ -572,9 +604,64 @@ class BibleWindow(
         exec("window.find(${jsString(text)}, false, ${!forward}, true);")
     }
 
+    // ------------------------------------------------------------------ AI documents
+
+    /** AiDocPagesChangedEvent: refresh AI document markers (BibleView.onEvent). */
+    fun aiDocMarkersChanged(e: net.bible.service.sword.mydocument.AiDocPagesChangedEvent) {
+        val v11n = (page as? Page.Bible)?.book?.versification
+        if (e.markers.isNotEmpty()) {
+            val arr = kotlinx.serialization.json.JsonArray(e.markers.map { Ai.markerJson(it, v11n) })
+            exec("bibleView.emit('add_or_update_ai_doc_markers', $arr)")
+        }
+        if (e.deletedPageIds.isNotEmpty()) {
+            exec("bibleView.emit('delete_ai_doc_markers', ${e.deletedPageIds.joinToString(",", "[", "]") { jsString(it.toString()) }})")
+        }
+    }
+
+    /** Shows a message instead of the document (e.g. while an AI page is regenerated). */
+    fun showMessage(text: String) {
+        pending = Initial(Documents.error(text, "NORMAL"))
+        if (clientReady) replaceDocument()
+    }
+
+    // ------------------------------------------------------------------ reading progress & memorization events
+
+    override fun memorizationChanged(addedMemorized: List<Int>, removedMemorized: List<Int>, addedTargets: List<Int>, removedTargets: List<Int>) {
+        val p = page
+        if (p !is Page.Bible && p !is Page.Memorize) return
+        val v11n = docV11n ?: return
+        if (addedMemorized.isEmpty() && removedMemorized.isEmpty() && addedTargets.isEmpty() && removedTargets.isEmpty()) {
+            Platform.runLater { reload() }; return
+        }
+        fun conv(l: List<Int>) = l.joinToString(",", "[", "]") { Verse(KJVA, it).toV11n(v11n).ordinal.toString() }
+        Platform.runLater {
+            exec("bibleView.emit('update_memorization_data', {addedMemorized: ${conv(addedMemorized)}, " +
+                "removedMemorized: ${conv(removedMemorized)}, addedTargets: ${conv(addedTargets)}, removedTargets: ${conv(removedTargets)}})")
+        }
+    }
+
+    override fun chapterReadStatusChanged(kjvBookOrdinal: Int, chapter: Int, count: Int) {
+        val p = page as? Page.Bible ?: return
+        if (p.verse.toV11n(KJVA).book.ordinal != kjvBookOrdinal) return
+        Platform.runLater { exec("bibleView.emit('update_chapter_read_status', {chapter: $chapter, count: $count})") }
+    }
+
+    override fun activeCycleChanged() {
+        val p = page as? Page.Bible ?: return
+        if (minChapter < 0 || maxChapter < 0) return
+        val counts = (minChapter..maxChapter).map { it to Progress.chapterReadCount(p.book.versification, p.verse.book, it) }
+        Platform.runLater { counts.forEach { (c, n) -> exec("bibleView.emit('update_chapter_read_status', {chapter: $c, count: $n})") } }
+    }
+
+    override fun settingsChanged() {
+        val bundle = Progress.settingsBundleJson()
+        Platform.runLater { exec("bibleView.emit('update_reading_progress_settings', $bundle)"); updateConfig() }
+    }
+
     fun dispose() {
         disposed = true
         Bookmarks.removeListener(this)
+        Progress.removeListener(this)
         engine.load("about:blank")
     }
 }

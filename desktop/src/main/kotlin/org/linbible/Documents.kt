@@ -28,6 +28,7 @@ import org.crosswire.jsword.versification.Versification
 import org.jdom2.Element
 import java.util.Locale
 import java.util.UUID
+import net.bible.service.sword.mydocument.isMyDocument
 import kotlin.math.abs
 
 private val sanitizeRegex = Regex("""[^\p{L}\d]""")
@@ -37,6 +38,13 @@ val Key.uniqueId: String get() =
     if (this is VerseRange) "ordinal-${start.ordinal}-${end.ordinal}" else sanitizeId(osisID)
 
 val VerseRange.onlyNumber: String get() = if (cardinality > 1) "${start.verse}-${end.verse}" else "${start.verse}"
+
+/** AndBible's Key.shortName: the name with abbreviated book names. */
+val Key.shortName: String get() = synchronized(BookName::class.java) {
+    val old = BookName.isFullBookName()
+    BookName.setFullBookName(false)
+    try { name } finally { BookName.setFullBookName(old) }
+}
 
 val VerseRange.abbreviated: String get() = synchronized(BookName::class.java) {
     val was = BookName.isFullBookName()
@@ -103,7 +111,12 @@ object Documents {
             str("type", "osis")
             put("osisFragment", osisFragment(xml, key, book))
             range("ordinalRange", ordRange)
-            put("readingProgress", JsonNull)
+            val vr = when (key) { is VerseRange -> key; is Verse -> VerseRange(key.versification, key, key); else -> null }
+            put("readingProgress", when {
+                book.bookCategory == BookCategory.COMMENTARY && book is SwordBook && vr != null ->
+                    readingProgress(book.versification, vr.toV11n(book.versification))
+                else -> Epub.readingProgress(book, key) ?: JsonNull
+            })
             str("bookInitials", book.initials)
             str("bookCategory", book.bookCategory.name)
             str("bookAbbreviation", book.abbreviation)
@@ -114,14 +127,8 @@ object Documents {
             str("v11n", (book as? SwordBook)?.versification?.name)
             arr("genericBookmarks", Bookmarks.genericBookmarksFor(book, key.osisRef).map { clientGenericBookmark(it) })
             range("highlightedOrdinalRange", highlight)
-            bool("isNativeHtml", false)
-            bool("isMyDocument", false)
-            bool("isAiDocument", false)
-            str("myDocumentPageId", null)
-            str("sourcePromptId", null)
-            str("sourcePromptName", null)
-            str("sourceModelName", null)
-            arr("aiDocMarkers", emptyList())
+            bool("isNativeHtml", Epub.isEpub(book) || book.isMyDocument)
+            Ai.myDocumentFields(book, key).forEach { (k, v) -> put(k, v) }
             put("commentaryRange", if (block == null || block.start == block.end) JsonNull else buildJsonObject {
                 str("startOsisRef", block.start.osisRef)
                 str("endOsisRef", block.end.osisRef)
@@ -147,11 +154,53 @@ object Documents {
             num("chapterNumber", vr.start.chapter)
             range("originalOrdinalRange", original?.let { it.start.ordinal..it.end.ordinal })
             str("v11n", v11n.name)
-            ints("memorizedOrdinals", emptyList())
-            ints("targetOrdinals", emptyList())
-            num("chapterReadCount", 0)
-            put("readingProgress", JsonNull)
+            val kjv = vr.toV11n(KJVA)
+            ints("memorizedOrdinals", Progress.memorizedOrdinalsIn(kjv.start.ordinal, kjv.end.ordinal).map { Verse(KJVA, it).toV11n(v11n).ordinal })
+            ints("targetOrdinals", Progress.targetOrdinalsIn(kjv.start.ordinal, kjv.end.ordinal).map { Verse(KJVA, it).toV11n(v11n).ordinal })
+            num("chapterReadCount", Progress.chapterReadCount(v11n, vr.start.book, vr.start.chapter))
+            put("readingProgress", readingProgress(v11n, vr))
+            put("aiDocMarkers", Ai.bibleAiDocMarkers(kjv, v11n))
         })
+    }
+
+    /** ReadingProgressInfo.forVerseKey: position within the current Bible book. */
+    fun readingProgress(v11n: org.crosswire.jsword.versification.Versification, vr: VerseRange): JsonObject {
+        val book = vr.start.book
+        val lastChapter = v11n.getLastChapter(book)
+        return buildJsonObject {
+            str("kind", "bible")
+            num("unitStart", Verse(v11n, book, 1, 1).ordinal)
+            num("unitEnd", Verse(v11n, book, lastChapter, v11n.getLastVerse(book, lastChapter)).ordinal)
+            num("chapterCount", lastChapter)
+            num("currentChapter", vr.start.chapter)
+        }
+    }
+
+    /** AndBible's MemorizeDocument. */
+    fun memorize(book: SwordBook, range: VerseRange, state: String?): JsonObject {
+        val v11n = range.versification
+        val kjv = range.toV11n(KJVA)
+        return buildJsonObject {
+            str("id", UUID.randomUUID().toString())
+            str("type", "memorize")
+            str("title", range.name)
+            arr("texts", range.map { v ->
+                val verse = v as Verse
+                buildJsonObject {
+                    str("key", verse.shortName)
+                    str("text", Content.plainText(book, VerseRange(v11n, verse, verse)))
+                }
+            })
+            if (state != null) put("state", json.parseToJsonElement(state))
+            str("bookInitials", book.initials)
+            str("v11n", v11n.name)
+            str("osisRef", range.osisRef)
+            num("startOrdinal", range.start.ordinal)
+            num("endOrdinal", range.end.ordinal)
+            ints("memorizedOrdinals", Progress.memorizedOrdinalsIn(kjv.start.ordinal, kjv.end.ordinal).map { Verse(KJVA, it).toV11n(v11n).ordinal })
+            ints("targetOrdinals", Progress.targetOrdinalsIn(kjv.start.ordinal, kjv.end.ordinal).map { Verse(KJVA, it).toV11n(v11n).ordinal })
+            put("readingProgressSettings", json.parseToJsonElement(Progress.settingsBundleJson()))
+        }
     }
 
     fun multi(fragments: List<Pair<Book, Key>>, compare: Boolean): JsonObject {
@@ -204,8 +253,8 @@ object Documents {
         num("orderNumber", e.orderNumber)
         num("indentLevel", e.indentLevel)
         str("text", e.text)
-        str("contentType", null)
-        str("sourcePromptId", null)
+        str("contentType", e.contentType)
+        str("sourcePromptId", e.sourcePromptId)
         str("type", "journal")
         num("hashCode", abs(e.id.hashCode()))
     }
@@ -280,9 +329,9 @@ object Documents {
             str("primaryLabelId", b.primaryLabelId ?: labelsOf(b.id, false).first())
             bool("wholeVerse", b.wholeVerse || book == null)
             str("customIcon", b.customIcon)
-            str("notesContentType", null)
+            str("notesContentType", b.notesContentType)
             put("editAction", editAction(b.editAction))
-            str("sourcePromptId", null)
+            str("sourcePromptId", b.sourcePromptId ?: b.notesSourcePromptId)
         }
     }
 
@@ -318,9 +367,9 @@ object Documents {
             str("primaryLabelId", g.primaryLabelId ?: labelsOf(g.id, true).first())
             bool("wholeVerse", g.wholeVerse)
             str("customIcon", g.customIcon)
-            str("notesContentType", null)
+            str("notesContentType", g.notesContentType)
             put("editAction", editAction(g.editAction))
-            str("sourcePromptId", null)
+            str("sourcePromptId", g.sourcePromptId ?: g.notesSourcePromptId)
         }
     }
 }

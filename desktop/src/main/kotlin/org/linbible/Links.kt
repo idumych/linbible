@@ -198,10 +198,13 @@ class Links(private val app: MainApp) {
         }
     }
 
+    fun strongsKey(book: Book, key: String): Key? = strongsKeyFor(book, key)
+
+    companion object {
     private val keyStyle = HashMap<String, Int>()
 
     /** Strong's dictionaries use differing key conventions (G3056, 03056, 3056, ...). */
-    private fun strongsKey(book: Book, key: String): Key? {
+    fun strongsKeyFor(book: Book, key: String): Key? = synchronized(keyStyle) {
         val m = Regex("^([GHgh]?)(0*)([0-9]+).*").find(key) ?: return runCatching { book.getKey(key) }.getOrNull()
         val category = m.groupValues[1].uppercase().ifEmpty {
             if (book.hasFeature(org.crosswire.jsword.book.FeatureType.HEBREW_DEFINITIONS)) "H" else "G"
@@ -216,6 +219,7 @@ class Links(private val app: MainApp) {
             if (k != null && k.cardinality > 0) { keyStyle[book.initials] = i; return k }
         }
         return null
+    }
     }
 }
 

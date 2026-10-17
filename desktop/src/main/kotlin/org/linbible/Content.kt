@@ -59,7 +59,7 @@ object Content {
                 frag.removeContent()
                 frag.addContent(verseContent)
                 addAnchors(frag)
-            } else if (book.bookCategory != BookCategory.BIBLE) {
+            } else if (book.bookCategory != BookCategory.BIBLE && !Epub.isEpub(book)) {
                 addAnchors(frag)
             }
             fragmentCache[cacheKey] = frag
@@ -80,7 +80,9 @@ object Content {
 
     /** Plain text of [key] (no notes, no headings), used for copying, bookmarks and search results. */
     fun plainText(book: Book, key: Key): String = try {
-        OSISUtil.getCanonicalText(BookData(book, key).osisFragment).replace(Regex("\\s+"), " ").trim()
+        val handler = CanonicalTextHandler()
+        BookData(book, key).saxEventProvider.provideSAXEvents(handler)
+        handler.text.trim()
     } catch (e: Exception) {
         Log.e("plainText failed for ${book.initials} $key", e)
         ""
@@ -149,8 +151,31 @@ object Content {
     private val xhtml = Namespace.getNamespace("http://www.w3.org/1999/xhtml")
     private val bvaQuery = XPathFactory.instance().compile(".//ns:BVA", Filters.element(), null, Namespace.getNamespace("ns", "http://www.w3.org/1999/xhtml"))
 
-    fun addAnchors(frag: Element): Int {
+    // IMPORTANT (AndBible): the logic of this function must never change, or bookmark locations in non-Bible books
+    // (and EPUBs) are messed up.
+    fun addAnchors(frag: Element, lang: String = "en", isEpub: Boolean = false): Int {
         var ordinal = 0
+        fun addContent(span: Element, textContent: String) {
+            if (isEpub) {
+                for ((t, isRef) in bibleRefSplit(textContent)) {
+                    if (!isRef) {
+                        span.addContent(Text(t))
+                    } else {
+                        val osisRef = resolveRef(t, KJVA)?.osisRef
+                        if (osisRef == null) {
+                            span.addContent(Text(t))
+                        } else {
+                            val refNode = Element("reference", xhtml)
+                            refNode.addContent(Text(t))
+                            refNode.setAttribute("osisRef", osisRef)
+                            span.addContent(refNode)
+                        }
+                    }
+                }
+            } else {
+                span.addContent(Text(textContent))
+            }
+        }
         for (content in textQuery.evaluate(frag)) {
             if (content.text.trim().isEmpty()) continue
             val parent = content.parentElement
@@ -161,7 +186,7 @@ object Content {
                 for (textContent in textContents) {
                     val bva = Element("BVA", xhtml)
                     bva.setAttribute("ordinal", "${ordinal++}")
-                    bva.addContent(Text(textContent))
+                    addContent(bva, textContent)
                     parent.addContent(pos++, bva)
                 }
             }
@@ -169,12 +194,60 @@ object Content {
         return ordinal
     }
 
+    // Detect bible references, like 1 John 2:3-4, 4:5-6:7, 4-5 (SwordContentFacade.bibleRefRe)
+    private val bibleRefRe = Regex("" +
+        """(((\d\.?\p{Z}+)?\p{Lu}\p{L}+\.?)\p{Z}+((\d+)(:\d+)?)(\p{Pd}\d+(:\d+)?)?)""" +
+        """([,;]?\p{Z}*(\d+:\d+|\d+)(?!\.?\p{Z}*\p{L})(\p{Pd}\d+(:\d+)?)?)*"""
+    )
+
+    fun bibleRefSplit(text: String): List<Pair<String, Boolean>> {
+        val pieces = mutableListOf<Pair<String, Boolean>>()
+        var last = 0
+        for (m in bibleRefRe.findAll(text)) {
+            val prev = text.slice(last until m.range.first)
+            if (prev.isNotEmpty()) pieces.add(prev to false)
+            pieces.add(m.groupValues[0] to true)
+            last = m.range.last + 1
+        }
+        val leftover = text.slice(last until text.length)
+        if (leftover.isNotEmpty()) pieces.add(leftover to false)
+        return pieces
+    }
+
+    private val dashesRe = Regex("""\p{Pd}""")
+
+    /** SwordContentFacade.resolveRef (without fuzzy book-name matching). */
+    fun resolveRef(ref: String, v11n: org.crosswire.jsword.versification.Versification): Key? {
+        val searchRef = ref.replace(dashesRe, "-")
+        val names = org.crosswire.jsword.versification.BibleNames.instance()
+        return synchronized(names) {
+            val orig = names.enableFuzzy
+            names.enableFuzzy = false
+            try {
+                val k = runCatching { org.crosswire.jsword.passage.PassageKeyFactory.instance().getKey(v11n, searchRef) }.getOrNull()
+                val chapter = runCatching { k?.getRangeAt(0, org.crosswire.jsword.passage.RestrictionType.NONE)?.start?.chapter }.getOrNull()
+                if (k != null && chapter == 0) null else k
+            } finally {
+                names.enableFuzzy = orig
+            }
+        }
+    }
+
     /** Ordinal range of BVA anchors within a non-Bible fragment. */
-    fun ordinalRangeFor(book: Book, key: Key): IntRange? = try {
+    fun ordinalRangeFor(book: Book, key: Key): IntRange? = Epub.state(book)?.getOrdinalRange(key) ?: try {
         val ords = bvaQuery.evaluate(readOsisFragment(book, key)).map { it.getAttributeValue("ordinal").toInt() }
         if (ords.isEmpty()) 0..0 else ords.min()..ords.max()
     } catch (e: OsisError) {
         null
+    }
+
+    /** Texts of the BVA anchors within [range] (SwordContentFacade.getTextWithinOrdinalsAsString). */
+    fun textsWithinOrdinals(book: Book, key: Key, range: IntRange): List<String> = try {
+        bvaQuery.evaluate(readOsisFragment(book, key))
+            .filter { it.getAttributeValue("ordinal").toInt() in range }
+            .map { it.value }
+    } catch (e: OsisError) {
+        emptyList()
     }
 
     /** Text of the BVA anchors within [range], for generic (non-Bible) bookmarks. */
@@ -184,5 +257,54 @@ object Content {
             .joinToString(" ") { it.value.trim() }
     } catch (e: OsisError) {
         ""
+    }
+}
+
+/**
+ * Port of AndBible's OsisToCanonicalTextSaxHandler: the canonical text of an OSIS fragment, without notes and titles,
+ * keeping the original spacing between words and punctuation.
+ */
+private class CanonicalTextHandler : org.xml.sax.helpers.DefaultHandler() {
+    private val out = StringBuilder()
+    private val stack = java.util.ArrayDeque<Boolean>()
+    private var spaceJustWritten = true
+    val text: String get() = out.toString()
+
+    override fun startDocument() { out.setLength(0); stack.clear(); stack.push(true) }
+
+    override fun startElement(uri: String?, localName: String?, qName: String, attrs: org.xml.sax.Attributes?) {
+        val name = if (!localName.isNullOrEmpty()) localName else qName
+        when {
+            attrs?.getValue("canonical") == "true" -> stack.push(true)
+            name == OSISUtil.OSIS_ELEMENT_VERSE -> { stack.push(true); spaceJustWritten = true }
+            name == "milestone" -> { write(attrs?.getValue("marker") ?: ""); stack.push(false) }
+            name == OSISUtil.OSIS_ELEMENT_NOTE || name == OSISUtil.OSIS_ELEMENT_TITLE -> stack.push(false)
+            name == OSISUtil.OSIS_ELEMENT_Q -> { write(attrs?.getValue("marker") ?: ""); stack.push(true) }
+            name == OSISUtil.OSIS_ELEMENT_L || name == OSISUtil.OSIS_ELEMENT_LB || name == OSISUtil.OSIS_ELEMENT_P -> {
+                write(" "); stack.push(stack.peek())
+            }
+            else -> stack.push(stack.peek())
+        }
+    }
+
+    override fun endElement(uri: String?, localName: String?, qName: String) {
+        val name = if (!localName.isNullOrEmpty()) localName else qName
+        if (name == OSISUtil.OSIS_ELEMENT_VERSE) write(" ")
+        stack.pop()
+    }
+
+    override fun characters(ch: CharArray, start: Int, length: Int) {
+        if (stack.peek() == true) write(String(ch, start, length))
+    }
+
+    private fun write(s: String) {
+        if (s.isEmpty()) return
+        if (s.isNotBlank()) {
+            out.append(s)
+            spaceJustWritten = s.last().isWhitespace()
+        } else if (!spaceJustWritten) {
+            out.append(' ')
+            spaceJustWritten = true
+        }
     }
 }

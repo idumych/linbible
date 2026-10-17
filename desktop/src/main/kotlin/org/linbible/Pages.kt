@@ -32,7 +32,7 @@ sealed class Page {
     }
 
     /** A keyed entry of a dictionary, general book, or a specific commentary key. */
-    data class Keyed(override val book: Book, val key: Key, val highlight: IntRange? = null) : Page() {
+    data class Keyed(override val book: Book, val key: Key, val highlight: IntRange? = null, val htmlId: String? = null) : Page() {
         override val title: String get() = "${book.abbreviation} – ${key.name}"
     }
 
@@ -42,6 +42,10 @@ sealed class Page {
     }
     data class MyNotes(val range: VerseRange) : Page() {
         override val title: String get() = "My Notes – ${range.name}"
+    }
+    /** AndBible's memorize mode for a verse range. */
+    data class Memorize(override val book: SwordBook, val range: VerseRange) : Page() {
+        override val title: String get() = "Memorize – ${range.name}"
     }
     data class Message(val text: String) : Page() {
         override val title: String get() = "LinBible"

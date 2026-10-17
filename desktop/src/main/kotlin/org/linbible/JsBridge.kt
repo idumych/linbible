@@ -60,7 +60,7 @@ class JsBridge(private val w: BibleWindow) {
     fun setEditing(enabled: Boolean) { w.editing = enabled }
     fun reportModalState(value: Boolean) {}
     fun onKeyDown(key: String) {}
-    fun saveState(newState: String) {}
+    fun saveState(newState: String) { w.jsState = newState }
     fun querySelection(bookmarkId: String?, value: Boolean) {}
 
     // --- references
@@ -258,29 +258,100 @@ class JsBridge(private val w: BibleWindow) {
     // --- AndBible features not (yet) available on the desktop
     private fun unsupported(what: String) = later { app.toast("$what is not available in LinBible yet") }
 
-    fun openEpubLink(bookInitials: String, toKey: String, toId: String) = unsupported("EPUB")
-    fun memorize(bookInitials: String, verseOrdinal: Int, endOrdinal: Int) = unsupported("Memorize mode")
-    fun markAsMemorized(bookInitials: String, startOrdinal: Int, endOrdinal: Int) {}
-    fun addMemorizationTarget(bookInitials: String, startOrdinal: Int, endOrdinal: Int) {}
-    fun unmarkMemorized(bookInitials: String, startOrdinal: Int, endOrdinal: Int) {}
-    fun removeMemorizationTarget(bookInitials: String, startOrdinal: Int, endOrdinal: Int) {}
-    fun speakMemorizationLoop(bookInitials: String, v11n: String, startOrdinal: Int, endOrdinal: Int) {}
-    fun openReadingProgress(tab: Int) = unsupported("Reading progress")
-    fun openReadingProgressSettings() = unsupported("Reading progress")
-    fun recordChapterRead(bookInitials: String, startOrdinal: Int, chapter: Int, source: String?) {}
-    fun openChapterReadHistory(bookInitials: String, startOrdinal: Int, chapter: Int) = unsupported("Reading history")
-    fun setReadingProgressSettings(json: String) {}
-    fun llmAction(bookInitials: String, startOrdinal: Int, endOrdinal: Int, text: String) = unsupported("AI assistant")
-    fun llmActionGeneric(bookInitials: String, osisRef: String, startOrdinal: Int, endOrdinal: Int, text: String) = unsupported("AI assistant")
-    fun noteEditorLlmAction(contextJson: String) = unsupported("AI assistant")
-    fun getMyDocumentPageRawContent(callId: Int, bookInitials: String, pageKey: String) = w.response(callId, "null")
-    fun saveMyDocumentPageContent(bookInitials: String, pageId: String, content: String, title: String?) {}
-    fun reloadMyDocumentPage(bookInitials: String) {}
-    fun regenerateMyDocumentPage(pageId: String) {}
-    fun deleteMyDocumentPage(pageId: String) {}
-    fun shareMyDocumentContent(bookInitials: String, pageKey: String) {}
-    fun copyMyDocumentContent(bookInitials: String, pageKey: String) {}
-    fun openPromptEditor(promptId: String) {}
-    fun openAiDocPage(documentInitials: String, pageKey: String) {}
-    fun openAiDocPageChooser(markersJson: String) {}
+    fun openEpubLink(bookInitials: String, toKey: String, toId: String) = later {
+        val book = Sword.book(bookInitials) ?: return@later
+        val key = Epub.state(book)?.getKey(toKey, toId) ?: return@later
+        app.navigate(w, Page.Keyed(book, key, htmlId = toId.ifEmpty { null }))
+    }
+    // --- memorization & reading progress (ProgressControl)
+    fun memorize(bookInitials: String, verseOrdinal: Int, endOrdinal: Int) = later {
+        val (book, range) = verseRange(bookInitials, verseOrdinal, endOrdinal) ?: return@later
+        Progress.addTargetIfNeeded(range)
+        app.openMemorize(book, range, w)
+    }
+    fun markAsMemorized(bookInitials: String, startOrdinal: Int, endOrdinal: Int) =
+        verseRange(bookInitials, startOrdinal, endOrdinal)?.let { Progress.markMemorized(it.second) }
+    fun addMemorizationTarget(bookInitials: String, startOrdinal: Int, endOrdinal: Int) =
+        verseRange(bookInitials, startOrdinal, endOrdinal)?.let { Progress.addTarget(it.second) }
+    fun unmarkMemorized(bookInitials: String, startOrdinal: Int, endOrdinal: Int) =
+        verseRange(bookInitials, startOrdinal, endOrdinal)?.let { Progress.unmarkMemorized(it.second) }
+    fun removeMemorizationTarget(bookInitials: String, startOrdinal: Int, endOrdinal: Int) =
+        verseRange(bookInitials, startOrdinal, endOrdinal)?.let { Progress.removeTargetRange(it.second) }
+    fun speakMemorizationLoop(bookInitials: String, v11n: String, startOrdinal: Int, endOrdinal: Int) = later {
+        val book = Sword.book(bookInitials) as? SwordBook ?: return@later
+        val vs = Page.v11n(v11n)
+        val range = VerseRange(vs, org.crosswire.jsword.passage.Verse(vs, startOrdinal), org.crosswire.jsword.passage.Verse(vs, endOrdinal))
+        app.speak(Content.plainText(book, range.toV11n(book.versification)))
+    }
+    fun openReadingProgress(tab: Int) = later { ProgressDialog.show(app, tab) }
+    fun openReadingProgressSettings() = later { ProgressDialog.showSettings(app) }
+    fun recordChapterRead(bookInitials: String, startOrdinal: Int, chapter: Int, source: String?) {
+        val book = Sword.book(bookInitials) as? SwordBook ?: return
+        val verse = org.crosswire.jsword.passage.Verse(book.versification, startOrdinal)
+        Progress.recordChapterRead(book.versification, verse.book, chapter, bookInitials, source ?: "MANUAL")
+    }
+    fun openChapterReadHistory(bookInitials: String, startOrdinal: Int, chapter: Int) = later {
+        val book = Sword.book(bookInitials) as? SwordBook ?: return@later
+        val kjvBook = org.crosswire.jsword.passage.Verse(book.versification, startOrdinal).toV11n(KJVA).book
+        ProgressDialog.showChapterHistory(app, kjvBook, chapter)
+    }
+    fun setReadingProgressSettings(json: String) = Progress.setSettingsBundle(json)
+    // --- AI assistant (BibleJavascriptInterface; the AI engine is AndBible's own code)
+    private val docCategory get() = w.page.category?.let { runCatching { net.bible.android.control.page.DocumentCategory.valueOf(it.name) }.getOrNull() }
+
+    fun llmAction(bookInitials: String, startOrdinal: Int, endOrdinal: Int, text: String) = later {
+        Ai.showPromptSelector(net.bible.android.view.activity.page.Selection(bookInitials, startOrdinal, endOrdinal.takeIf { it >= 0 }, text),
+            net.bible.service.llm.PromptContext.VERSE_SELECTION, docCategory)
+    }
+
+    fun llmActionGeneric(bookInitials: String, osisRef: String, startOrdinal: Int, endOrdinal: Int, text: String) = later {
+        Ai.showPromptSelector(net.bible.android.view.activity.page.Selection(bookInitials, osisRef, startOrdinal, endOrdinal.takeIf { it >= 0 }, text),
+            net.bible.service.llm.PromptContext.VERSE_SELECTION, docCategory)
+    }
+
+    @kotlinx.serialization.Serializable
+    private data class NoteEditorLlmContext(val entityType: String, val entityId: String, val currentText: String, val contentType: String)
+
+    fun noteEditorLlmAction(contextJson: String) = later {
+        val ctx = json.decodeFromString(NoteEditorLlmContext.serializer(), contextJson)
+        var bookInitials: String? = null
+        var start = 0
+        var end = 0
+        if (ctx.entityType == net.bible.service.llm.agent.NoteEditorEntityType.BOOKMARK_NOTE.name) {
+            Bookmarks.bibleBookmark(ctx.entityId)?.let { b -> bookInitials = b.bookInitials; start = b.ordinalStart; end = b.ordinalEnd }
+        }
+        val selection = net.bible.android.view.activity.page.Selection(
+            bookInitials = bookInitials, startOrdinal = start, startOffset = null, endOrdinal = end, endOffset = null,
+            bookmarks = emptyList(),
+            noteEditorEntityType = runCatching { net.bible.service.llm.agent.NoteEditorEntityType.valueOf(ctx.entityType) }.getOrNull(),
+            noteEditorEntityId = ctx.entityId, noteEditorContent = ctx.currentText, noteEditorContentType = ctx.contentType,
+        )
+        Ai.showPromptSelector(selection, net.bible.service.llm.PromptContext.NOTE_EDITOR)
+    }
+
+    fun getMyDocumentPageRawContent(callId: Int, bookInitials: String, pageKey: String) {
+        val r = net.bible.service.sword.mydocument.MyDocumentBookManager.getPageRawContent(bookInitials, pageKey)
+        w.response(callId, if (r == null) "null" else json.encodeToString(net.bible.service.sword.mydocument.MyDocumentBookManager.PageRawContent.serializer(), r))
+    }
+
+    fun saveMyDocumentPageContent(bookInitials: String, pageId: String, content: String, title: String?) =
+        net.bible.service.sword.mydocument.MyDocumentBookManager.savePageContent(net.bible.android.database.IdType(pageId), content, title)
+
+    fun reloadMyDocumentPage(bookInitials: String) = net.bible.service.sword.mydocument.MyDocumentBookManager.refreshDocument(bookInitials)
+
+    fun regenerateMyDocumentPage(pageId: String) = later { Ai.showRegenerateDialog(net.bible.android.database.IdType(pageId), w) }
+
+    fun deleteMyDocumentPage(pageId: String) = later { Ai.deleteAiDocPage(net.bible.android.database.IdType(pageId), w) }
+
+    fun shareMyDocumentContent(bookInitials: String, pageKey: String) = copyMyDocumentContent(bookInitials, pageKey)
+
+    fun copyMyDocumentContent(bookInitials: String, pageKey: String) = later {
+        val r = net.bible.service.sword.mydocument.MyDocumentBookManager.getPageRawContent(bookInitials, pageKey) ?: return@later
+        app.copyToClipboard(r.content)
+        app.toast("Copied \"${r.title}\"")
+    }
+
+    fun openPromptEditor(promptId: String) = later { AiSettingsDialog.editPrompt(app, net.bible.android.database.IdType(promptId)) }
+    fun openAiDocPage(documentInitials: String, pageKey: String) = later { Ai.openAiDocPage(documentInitials, pageKey, w) }
+    fun openAiDocPageChooser(markersJson: String) = later { Ai.openAiDocPageChooser(markersJson, w) }
 }

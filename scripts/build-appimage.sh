@@ -62,7 +62,7 @@ DIST="$ROOT/desktop/build/install/linbible"
 step "Creating Java runtime with jlink"
 rm -rf "$BUILD"
 mkdir -p "$BUILD"
-MODULES="java.base,java.desktop,java.logging,java.management,java.naming,java.net.http,java.scripting,java.xml,java.prefs,\
+MODULES="java.base,java.desktop,java.logging,java.management,java.naming,java.net.http,java.scripting,java.xml,java.prefs,java.sql,\
 jdk.httpserver,jdk.jsobject,jdk.unsupported,jdk.crypto.ec,jdk.charsets,jdk.localedata,jdk.zipfs,\
 javafx.base,javafx.graphics,javafx.controls,javafx.web,javafx.media,javafx.swing"
 jlink --module-path "$JAVA_HOME/jmods" --add-modules "$MODULES" \

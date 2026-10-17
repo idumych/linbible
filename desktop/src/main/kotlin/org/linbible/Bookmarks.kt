@@ -2,7 +2,8 @@
  * LinBible - desktop port of AndBible: Bible Study (https://github.com/AndBible/and-bible)
  * Licensed under the GNU General Public License v3 or later.
  *
- * Bookmarks, labels and StudyPads. Data model mirrors AndBible's BookmarkEntities, persisted as JSON.
+ * Bookmarks, labels and StudyPads. Data model mirrors AndBible's BookmarkEntities and is stored in AndBible's
+ * bookmarks.sqlite3 format (see Db.kt).
  */
 package org.linbible
 
@@ -20,6 +21,7 @@ fun newId(): String = UUID.randomUUID().toString()
 const val UNLABELED_LABEL_ID = "00000000-0000-ab1e-0000-001abe1ed001"
 const val PARAGRAPH_BREAK_LABEL_ID = "00000000-0000-ab1e-0000-ba4a64a30001"
 const val SPEAK_LABEL_ID = "00000000-0000-ab1e-0000-5bea400001a1"
+const val AI_LABEL_ID = "00000000-0000-ab1e-0000-a100000001a1"
 const val DEFAULT_LABEL_COLOR: Int = (255 shl 24) or (145 shl 16) or (167 shl 8) or 255
 
 @Serializable
@@ -38,15 +40,18 @@ data class Label(
     var hideStyleWholeVerse: Boolean = false,
     var favourite: Boolean = false,
     var customIcon: String? = null,
+    var type: String? = null,
 ) {
-    val isUnlabeled get() = id == UNLABELED_LABEL_ID
-    val isParagraphBreak get() = id == PARAGRAPH_BREAK_LABEL_ID
-    val isSpeak get() = id == SPEAK_LABEL_ID
-    val isSpecial get() = isUnlabeled || isParagraphBreak || isSpeak
+    val isUnlabeled get() = id == UNLABELED_LABEL_ID || name == "__UNLABELED__"
+    val isParagraphBreak get() = id == PARAGRAPH_BREAK_LABEL_ID || name == "__PARAGRAPH_BREAK_LABEL__"
+    val isSpeak get() = id == SPEAK_LABEL_ID || name == "__SPEAK_LABEL__"
+    val isAi get() = id == AI_LABEL_ID || name == "__AI_LABEL__"
+    val isSpecial get() = isUnlabeled || isParagraphBreak || isSpeak || isAi
     val displayName get() = when {
         isUnlabeled -> "Unlabeled"
         isParagraphBreak -> "Paragraph break"
         isSpeak -> "Speak"
+        isAi -> "AI"
         else -> name
     }
 }
@@ -80,6 +85,11 @@ data class BibleBookmark(
     var primaryLabelId: String? = null,
     var customIcon: String? = null,
     var editAction: EditAction? = null,
+    var notesContentType: String? = null,
+    var notesSourcePromptId: String? = null,
+    var playbackSettings: String? = null,
+    var type: String? = null,
+    var sourcePromptId: String? = null,
 ) {
     val verseRange: VerseRange get() {
         val v = Versifications.instance().getVersification(v11n)
@@ -104,6 +114,10 @@ data class GenericBookmark(
     var primaryLabelId: String? = null,
     var customIcon: String? = null,
     var editAction: EditAction? = null,
+    var notesContentType: String? = null,
+    var notesSourcePromptId: String? = null,
+    var playbackSettings: String? = null,
+    var sourcePromptId: String? = null,
 )
 
 @Serializable
@@ -113,6 +127,8 @@ data class StudyPadTextEntry(
     var orderNumber: Int,
     var indentLevel: Int = 0,
     var text: String = "",
+    var contentType: String? = null,
+    var sourcePromptId: String? = null,
 )
 
 @Serializable
@@ -137,7 +153,6 @@ interface BookmarkListener {
 }
 
 object Bookmarks {
-    private val file = File(AppDirs.data, "bookmarks.json")
     private var data = BookmarkData()
     private val listeners = mutableListOf<BookmarkListener>()
     private val textCache = HashMap<String, String>()
@@ -146,33 +161,90 @@ object Bookmarks {
     fun removeListener(l: BookmarkListener) { listeners -= l }
     private fun notify(f: BookmarkListener.() -> Unit) = listeners.toList().forEach { runCatching { it.f() }.onFailure { e -> Log.e("listener", e) } }
 
+    private val legacyFile = File(AppDirs.data, "bookmarks.json")
+    private lateinit var rows: RowSync
+
     fun load() {
-        if (file.exists()) {
-            data = try {
-                json.decodeFromString(BookmarkData.serializer(), file.readText())
-            } catch (e: Exception) {
-                Log.e("Could not read bookmarks, backing up", e)
-                file.copyTo(File(file.path + ".broken-${System.currentTimeMillis()}"))
-                BookmarkData()
-            }
-        }
+        Databases.onChanged(DbCategory.BOOKMARKS) { javafx.application.Platform.runLater { externallyChanged() } }
+        reloadFromDb()
+        if (legacyFile.exists() && data.bibleBookmarks.isEmpty() && data.genericBookmarks.isEmpty()) importLegacyJson()
         ensureSpecialLabel(UNLABELED_LABEL_ID)
         ensureSpecialLabel(PARAGRAPH_BREAK_LABEL_ID)
         ensureSpecialLabel(SPEAK_LABEL_ID)
+        save()
+    }
+
+    /** Re-reads everything from the database, e.g. after sync applied changes or a backup was restored. */
+    @Synchronized
+    fun reloadFromDb() {
+        val db = DbCategory.BOOKMARKS.db
+        rows = RowSync(db, BookmarkTables.specs)
+        val r = BookmarkTables.specs.associate { it.name to it.read(db) }
+        rows.reset(r)
+        data = BookmarkTables.fromRows(r)
+        textCache.clear()
+    }
+
+    /** The database was changed directly (AndBible code via BookmarkControl): reload now, refresh windows later. */
+    fun databaseChangedExternally() {
+        reloadFromDb()
+        javafx.application.Platform.runLater {
+            notify { labelsChanged(labels) }
+            notify { bookmarksChanged(bibleBookmarks, genericBookmarks) }
+        }
+    }
+
+    /** Called after the database changed underneath us; tells all windows to refresh. */
+    fun externallyChanged() {
+        reloadFromDb()
+        notify { labelsChanged(labels) }
+        notify { bookmarksChanged(bibleBookmarks, genericBookmarks) }
+    }
+
+    private fun importLegacyJson() {
+        try {
+            data = json.decodeFromString(BookmarkData.serializer(), legacyFile.readText())
+            Log.i("Imported ${data.bibleBookmarks.size + data.genericBookmarks.size} bookmarks from ${legacyFile.name}")
+            // Earlier LinBible versions stored special labels with their id as name
+            data.labels.filter { it.isSpecial }.forEach { it.name = specialName(it.id) }
+            save()
+            legacyFile.renameTo(File(legacyFile.path + ".imported"))
+        } catch (e: Exception) {
+            Log.e("Could not import ${legacyFile.name}", e)
+        }
+    }
+
+    private fun specialName(id: String) = when (id) {
+        UNLABELED_LABEL_ID -> "__UNLABELED__"
+        PARAGRAPH_BREAK_LABEL_ID -> "__PARAGRAPH_BREAK_LABEL__"
+        SPEAK_LABEL_ID -> "__SPEAK_LABEL__"
+        AI_LABEL_ID -> "__AI_LABEL__"
+        else -> id
     }
 
     private fun ensureSpecialLabel(id: String) {
         if (data.labels.none { it.id == id }) {
-            data.labels += Label(id = id, name = id, color = if (id == UNLABELED_LABEL_ID) DEFAULT_LABEL_COLOR else 0, underlineStyleWholeVerse = false)
+            data.labels += when (id) {
+                PARAGRAPH_BREAK_LABEL_ID -> Label(id = id, name = specialName(id), color = 0, underlineStyleWholeVerse = false,
+                    hideStyle = true, hideStyleWholeVerse = true)
+                SPEAK_LABEL_ID -> Label(id = id, name = specialName(id), color = (255 shl 24) or (255 shl 16), underlineStyleWholeVerse = false)
+                else -> Label(id = id, name = specialName(id), color = DEFAULT_LABEL_COLOR, underlineStyleWholeVerse = false)
+            }
         }
     }
 
     @Synchronized
     private fun save() {
-        val tmp = File(file.path + ".tmp")
-        tmp.writeText(prettyJson.encodeToString(BookmarkData.serializer(), data))
-        tmp.renameTo(file)
+        try {
+            rows.write(BookmarkTables.toRows(data))
+        } catch (e: Exception) {
+            Log.e("Saving bookmarks failed", e)
+            app?.toast("Saving bookmarks failed: ${e.message}")
+        }
     }
+
+    /** Set by the UI so storage errors can be shown. */
+    var app: MainApp? = null
 
     // ---------------- labels ----------------
 

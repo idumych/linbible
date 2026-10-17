@@ -40,7 +40,7 @@ fun argbToColor(c: Int): Color = Color.rgb((c shr 16) and 0xff, (c shr 8) and 0x
 fun colorToArgb(c: Color): Int =
     ((c.opacity * 255).toInt() shl 24) or ((c.red * 255).toInt() shl 16) or ((c.green * 255).toInt() shl 8) or (c.blue * 255).toInt()
 
-private fun styleLike(app: MainApp, scene: Scene) {
+fun styleLike(app: MainApp, scene: Scene) {
     scene.stylesheets += app.stage.scene.stylesheets
     scene.root.styleClass += app.stage.scene.root.styleClass
 }

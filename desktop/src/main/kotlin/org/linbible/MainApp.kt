@@ -13,6 +13,7 @@ import javafx.geometry.Orientation
 import javafx.geometry.Pos
 import javafx.scene.Scene
 import javafx.scene.control.ChoiceDialog
+import net.bible.service.llm.setApiKey
 import kotlin.math.roundToInt
 import javafx.scene.control.Alert
 import javafx.scene.control.Button
@@ -90,7 +91,14 @@ class MainApp : Application() {
         private set
     private val nightItem = CheckMenuItem("Night mode")
 
+    companion object {
+        /** The running application (used by the AndBible compatibility layer). */
+        var instance: MainApp? = null
+            private set
+    }
+
     override fun start(primaryStage: Stage) {
+        instance = this
         stage = primaryStage
         val s = Settings.state
         nightMode = if (s.followSystemTheme) systemPrefersDark() ?: s.nightMode else s.nightMode
@@ -99,7 +107,7 @@ class MainApp : Application() {
         val root = BorderPane()
         root.top = VBox(buildMenu(), buildToolbar())
         root.center = split
-        root.bottom = buildStatusBar()
+        root.bottom = VBox(buildStatusBar()).also { AgentLogPanel.install(this, it) }
 
         val vb = javafx.stage.Screen.getPrimary().visualBounds
         val scene = Scene(root, s.windowWidth.coerceAtMost(vb.width), s.windowHeight.coerceAtMost(vb.height))
@@ -120,9 +128,19 @@ class MainApp : Application() {
 
         stage.setOnCloseRequest { saveState() }
         stage.show()
+        Bookmarks.app = this
+        SyncDialog.setup(this)
+        Ai.init(this)
+        stage.scene.addEventFilter(javafx.scene.input.InputEvent.ANY) { SyncDialog.lastTouched = System.currentTimeMillis() }
         Log.d("render scale ${stage.renderScaleX}, screen ${javafx.stage.Screen.getPrimary().outputScaleX}")
 
         Sword.onBooksChanged { Platform.runLater { booksChanged() } }
+        Addons.listeners += {
+            val arr = { l: List<String> -> l.joinToString(",", "[", "]") { jsString(it) } }
+            val js = "{fontModuleNames: ${arr(Addons.fontModuleNames)}, featureModuleNames: ${arr(Addons.featureModuleNames)}, " +
+                "styleModuleNames: ${arr(Addons.styleModuleNames)}}"
+            Platform.runLater { windows.forEach { it.exec("bibleView.emit('reload_addons', $js)") } }
+        }
         JobManager.addWorkListener(object : WorkListener {
             override fun workProgressed(ev: WorkEvent) = Platform.runLater { showProgress(ev.job) }
             override fun workStateChanged(ev: WorkEvent) = Platform.runLater { showProgress(ev.job) }
@@ -159,6 +177,67 @@ class MainApp : Application() {
                         "repos" -> executor.submit { Log.i("repos: " + Repositories.available(false) { n, e -> Log.e("repo $n failed", e) }.size + " documents") }
                         "index" -> Sword.bibles.firstOrNull()?.let { SearchDialog.buildIndex(this@MainApp, it) { Log.i("index done") } }
                         "search" -> showSearch(arg)
+                        "readingplan" -> ReadingPlanDialog.show(this@MainApp)
+                        "installfile" -> OtherFormats.installFile(java.io.File(arg))
+                        "aisettings" -> AiSettingsDialog.show(this@MainApp, arg.toIntOrNull() ?: 0)
+                        "aiselect" -> { val b = (activeWindow?.page as? Page.Bible)?.book ?: Sword.bibles.first()
+                            val r = Page.parsePassage(b.versification, arg)!!.toV11n(b.versification)
+                            Ai.showPromptSelector(net.bible.android.view.activity.page.Selection(b.initials, r.start.ordinal, r.end.ordinal, ""),
+                                net.bible.service.llm.PromptContext.VERSE_SELECTION, net.bible.android.control.page.DocumentCategory.BIBLE) }
+                        "closetop" -> (javafx.stage.Window.getWindows().lastOrNull { it != stage && it.isShowing } as? javafx.stage.Stage)?.close()
+                        "aisetup" -> {
+                            val ai = net.bible.service.common.CommonUtils.aiSettings
+                            ai.aiDisclaimerAccepted = true
+                            ai.agentPermissionMode = net.bible.service.llm.agent.PermissionMode.ALLOW_ALL
+                            val dbx = net.bible.service.db.DatabaseContainer.instance.aiSettingsDb
+                            if (dbx.llmProviderConfigDao().getCount() == 0) {
+                                val cfg = net.bible.service.llm.LlmProviderConfig(providerType = "CUSTOM", displayName = "Mock", endpoint = arg,
+                                    apiFormat = net.bible.service.llm.ApiFormat.OPENAI)
+                                dbx.llmProviderConfigDao().insert(cfg)
+                                cfg.setApiKey("test-key")
+                                val m = net.bible.service.llm.LlmConfiguredModel.create(cfg.id, "mock-model")
+                                dbx.llmConfiguredModelDao().insert(m)
+                                ai.defaultModelId = m.id
+                            }
+                            updateAllConfigs()
+                        }
+                        "airun" -> {
+                            val b = (activeWindow?.page as? Page.Bible)?.book ?: Sword.bibles.first()
+                            val r = Page.parsePassage(b.versification, arg)!!.toV11n(b.versification)
+                            val prompts = net.bible.service.llm.PromptRepository.allPrompts()
+                            val prompt = prompts.firstOrNull { it.name == "Test explain" } ?: net.bible.service.llm.AgentPrompt(
+                                name = "Test explain", promptTemplate = "Explain the selected verses. Create a bookmark for them.",
+                                showIn = setOf(net.bible.service.llm.PromptContext.VERSE_SELECTION)).also { net.bible.service.llm.PromptRepository.insertPrompt(it) }
+                            Ai.executePrompt(prompt, net.bible.android.view.activity.page.Selection(b.initials, r.start.ordinal, r.end.ordinal, ""))
+                        }
+                        "epubsearch" -> executor.submit { Sword.installed.firstNotNullOfOrNull { Epub.state(it) }?.let { st -> st.buildSearchIndex()
+                            st.search(arg).forEach { h -> Log.i("epub hit: ${h.key.name} #${h.ordinal}: ${h.text}") } } }
+                        "document" -> (Sword.book(arg) ?: org.crosswire.jsword.book.Books.installed().books.firstOrNull { it.initials.startsWith(arg) })
+                            ?.let { changeDocument(it) } ?: Log.w("No document $arg")
+                        "display" -> { val (k, v) = arg.split("=", limit = 2); val d = Settings.state.display
+                            when (k) { "font" -> d.fontFamily = v; "daybg" -> d.dayBackgroundImage = v; "nightbg" -> d.nightBackgroundImage = v
+                                "dayop" -> d.dayBackgroundImageOpacity = v.toInt(); "nightop" -> d.nightBackgroundImageOpacity = v.toInt() }
+                            displaySettingsChanged() }
+                        "syncsetup" -> { val (u, n, pw, f) = arg.split("|"); Secrets.store("$n@$u", pw)
+                            Settings.state.syncServerUrl = u; Settings.state.syncUsername = n; Settings.state.syncFolderPath = f.ifEmpty { null }; Settings.save() }
+                        "syncenable" -> Settings.setSyncEnabled(DbCategory.valueOf(arg), true)
+                        "syncnow" -> executor.submit { Log.i("sync result: " + CloudSync.synchronize()) }
+                        "backup" -> executor.submit { Backup.exportDatabases(java.io.File(arg)); Log.i("backup written") }
+                        "restore" -> { val c = Backup.open(java.io.File(arg)); c.databases.forEach { (cat, f) -> Backup.import(cat, f) }; c.cleanup(); Log.i("backup imported") }
+                        "restorereplace" -> { val c = Backup.open(java.io.File(arg)); c.databases.forEach { (cat, f) -> Backup.restore(cat, f) }; c.cleanup(); Log.i("backup restored") }
+                        "exportpads" -> Backup.exportStudyPads(Bookmarks.userLabels.map { it.id }, java.io.File(arg))
+                        "modbackup" -> Backup.exportModules(Sword.installed.filter { it.initials == "KJV" }, java.io.File(arg))
+                        "progress" -> ProgressDialog.show(this@MainApp, arg.toIntOrNull() ?: 0)
+                        "readchapter" -> activeWindow?.page?.let { p -> (p as? Page.Bible)?.let { b ->
+                            org.linbible.Progress.recordChapterRead(b.book.versification, b.verse.book, b.verse.chapter, b.book.initials, "MANUAL") } }
+                        "memorize" -> (activeWindow?.page as? Page.Bible)?.let { b ->
+                            val r = Page.parsePassage(b.book.versification, arg)!!.toV11n(b.book.versification)
+                            org.linbible.Progress.addTargetIfNeeded(r); openMemorize(b.book, r, activeWindow) }
+                        "memorized" -> (activeWindow?.page as? Page.Bible)?.let { b ->
+                            org.linbible.Progress.markMemorized(Page.parsePassage(b.book.versification, arg)!!.toV11n(b.book.versification)) }
+                        "startplan" -> { ReadingPlans.startPlan(arg); ReadingPlanDialog.show(this@MainApp) }
+                        "plandone" -> ReadingPlans.currentPlanCode?.let { c -> ReadingPlans.done(c, ReadingPlans.currentDay(c), true) }
+                        "shotwin" -> writeWindowSnapshot(arg)
                     }
                 } }
             }.play()
@@ -169,6 +248,14 @@ class MainApp : Application() {
         }.play()
     }
 
+    /** Snapshot of the frontmost other window (dialogs). */
+    private fun writeWindowSnapshot(path: String) {
+        val w = javafx.stage.Window.getWindows().lastOrNull { it != stage && it.isShowing } ?: return
+        val img = w.scene.snapshot(null)
+        javax.imageio.ImageIO.write(javafx.embed.swing.SwingFXUtils.fromFXImage(img, null), "png", java.io.File(path))
+        Log.i("Window snapshot written to $path")
+    }
+
     private fun writeSnapshot(path: String) {
         val img = stage.scene.snapshot(null)
         javax.imageio.ImageIO.write(javafx.embed.swing.SwingFXUtils.fromFXImage(img, null), "png", java.io.File(path))
@@ -176,8 +263,10 @@ class MainApp : Application() {
     }
 
     override fun stop() {
+        SyncDialog.syncBeforeExit()
         AssetServer.stop()
         executor.shutdownNow()
+        Databases.closeAll()
     }
 
     // ------------------------------------------------------------------ layout
@@ -192,6 +281,10 @@ class MainApp : Application() {
             items.addAll(
                 item("Download documents…", "Shortcut+D") { showDownloads() },
                 item("Installed documents…") { showDownloads(installedTab = true) },
+                item("Install from file…", "Shortcut+O") { BackupDialog.chooseAndInstall(this@MainApp) },
+                SeparatorMenuItem(),
+                item("Backup & restore…") { BackupDialog.show(this@MainApp) },
+                item("Cloud sync…") { SyncDialog.show(this@MainApp) },
                 SeparatorMenuItem(),
                 item("Quit", "Shortcut+Q") { saveState(); Platform.exit() },
             )
@@ -204,6 +297,9 @@ class MainApp : Application() {
                 SeparatorMenuItem(),
                 item("Back", "Alt+Left") { goBack() },
                 item("Forward", "Alt+Right") { goForward() },
+                SeparatorMenuItem(),
+                item("Reading plan…", "Shortcut+Shift+R") { ReadingPlanDialog.show(this@MainApp) },
+                item("Reading progress…") { ProgressDialog.show(this@MainApp) },
             )
         }
         val search = Menu("_Search").apply {
@@ -248,6 +344,38 @@ class MainApp : Application() {
                 toggle("Bookmarks", { it.showBookmarks }) { d, v -> d.showBookmarks = v },
             )
         }
+        val aiMenu = Menu("_AI").apply {
+            items.addAll(
+                item("Ask AI about this workspace…") {
+                    Ai.showPromptSelector(net.bible.android.view.activity.page.Selection(null, -1, null, -1, null, emptyList()),
+                        net.bible.service.llm.PromptContext.WORKSPACE_MENU)
+                },
+                item("Ask AI about this window…") {
+                    val w = activeWindow ?: return@item
+                    val p = w.page
+                    val v = p.currentVerse
+                    val sel = when {
+                        p is Page.Bible -> net.bible.android.view.activity.page.Selection(p.book.initials, -1, null, -1, null, emptyList(),
+                            osisRef = org.crosswire.jsword.passage.VerseRange(p.verse.versification,
+                                Verse(p.verse.versification, p.verse.book, p.verse.chapter, 1),
+                                Verse(p.verse.versification, p.verse.book, p.verse.chapter, p.verse.versification.getLastVerse(p.verse.book, p.verse.chapter))).osisRef)
+                        p.book != null -> net.bible.android.view.activity.page.Selection(p.book!!.initials, -1, null, -1, null, emptyList(),
+                            osisRef = (p as? Page.Keyed)?.key?.osisRef ?: v?.osisRef)
+                        else -> return@item
+                    }
+                    Ai.showPromptSelector(sel, net.bible.service.llm.PromptContext.WINDOW_MENU,
+                        p.category?.let { runCatching { net.bible.android.control.page.DocumentCategory.valueOf(it.name) }.getOrNull() })
+                },
+                SeparatorMenuItem(),
+                item("AI documents") {
+                    val doc = org.crosswire.jsword.book.Books.installed().getBook(net.bible.service.sword.mydocument.MyDocumentBookManager.AI_DOCUMENTS_INITIALS)
+                    if (doc == null) toast("No AI documents yet") else Page.firstKey(doc)?.let { navigate(activeWindow ?: return@item, Page.Keyed(doc, it)) }
+                },
+                item("Show AI activity log") { AgentLogPanel.toggle(this@MainApp) },
+                SeparatorMenuItem(),
+                item("AI settings…") { AiSettingsDialog.show(this@MainApp) },
+            )
+        }
         val win = Menu("_Window").apply {
             items.addAll(
                 item("New Bible window", "Shortcut+T") { newWindow(BookCategory.BIBLE) },
@@ -260,8 +388,17 @@ class MainApp : Application() {
                     split.orientation = if (split.orientation == Orientation.HORIZONTAL) Orientation.VERTICAL else Orientation.HORIZONTAL
                     Settings.state.verticalSplit = split.orientation == Orientation.VERTICAL
                 },
-                item("Equalize window sizes") { setDividers(windows.map { 1.0 }) },
+                item("Equalize window sizes") { setDividers(windows.filter { it !in minimised }.map { 1.0 }) },
+                item("Minimise window") { activeWindow?.let { minimiseWindow(it) } },
             )
+            val fixed = items.toList()
+            setOnShowing {
+                items.setAll(fixed)
+                if (minimised.isNotEmpty()) {
+                    items += SeparatorMenuItem()
+                    minimised.toList().forEach { w -> items += item("Restore: ${w.page.title}") { restoreWindow(w) } }
+                }
+            }
         }
         val help = Menu("_Help").apply {
             items.addAll(
@@ -269,7 +406,7 @@ class MainApp : Application() {
                 item("About LinBible") { about() },
             )
         }
-        return MenuBar(file, nav, search, bookmarks, view, win, help)
+        return MenuBar(file, nav, search, bookmarks, view, aiMenu, win, help)
     }
 
     private fun toggle(text: String, get: (DisplaySettings) -> Boolean, set: (DisplaySettings, Boolean) -> Unit) =
@@ -375,6 +512,45 @@ class MainApp : Application() {
         setDividers(windows.map { 1.0 })
     }
 
+    // Minimised windows stay in [windows] but are not shown (AndBible's window minimise)
+    val minimised = mutableSetOf<BibleWindow>()
+
+    fun isLinksWindow(w: BibleWindow) = w === linksWindow
+
+    fun minimiseWindow(w: BibleWindow) {
+        if (w in minimised || windows.count { it !in minimised } <= 1) return
+        minimised += w
+        split.items.remove(w.root)
+        if (activeWindow === w) setActive(windows.first { it !in minimised })
+        refreshActiveIndicators()
+    }
+
+    fun restoreWindow(w: BibleWindow) {
+        if (!minimised.remove(w)) return
+        val shown = windows.filter { it !in minimised }
+        split.items.add(shown.indexOf(w).coerceIn(0, split.items.size), w.root)
+        setDividers(shown.map { 1.0 })
+        setActive(w)
+    }
+
+    /** The page showing [key] of [book] (AndBible's setCurrentDocumentAndKey). */
+    fun pageFor(book: Book, key: org.crosswire.jsword.passage.Key?): Page? = when {
+        book.bookCategory == BookCategory.BIBLE && book is SwordBook -> {
+            val v = (key as? org.crosswire.jsword.passage.Passage)?.let { Page.parsePassage(book.versification, it.osisRef) }
+                ?.let { it.getRangeAt(0, org.crosswire.jsword.passage.RestrictionType.NONE).start }
+                ?: (key as? Verse) ?: (key as? org.crosswire.jsword.passage.VerseRange)?.start
+                ?: activeWindow?.page?.currentVerse?.toV11n(book.versification) ?: Page.firstVerse(book)
+            Page.Bible(book, if (v.verse == 0) Verse(v.versification, v.book, v.chapter, 1) else v)
+        }
+        book.bookCategory == BookCategory.COMMENTARY && book is SwordBook -> {
+            val v = (key as? Verse) ?: (key as? org.crosswire.jsword.passage.VerseRange)?.start
+                ?: (key as? org.crosswire.jsword.passage.Passage)?.let { p -> if (p.cardinality > 0) p.getRangeAt(0, org.crosswire.jsword.passage.RestrictionType.NONE).start else null }
+                ?: activeWindow?.page?.currentVerse?.toV11n(book.versification) ?: Page.firstVerse(book)
+            Page.Commentary(book, v)
+        }
+        else -> (key ?: Page.firstKey(book))?.let { Page.Keyed(book, it) }
+    }
+
     fun closeWindow(w: BibleWindow) {
         if (w === linksWindow) {
             linksWindow = null
@@ -382,6 +558,7 @@ class MainApp : Application() {
             toast("The last window cannot be closed"); return
         }
         windows.remove(w)
+        minimised.remove(w)
         split.items.remove(w.root)
         w.dispose()
         history.remove(w); future.remove(w)
@@ -541,6 +718,29 @@ class MainApp : Application() {
         }
     }
 
+    /** Opens AndBible's memorize mode for [range] in the links window. */
+    fun openMemorize(book: SwordBook, range: org.crosswire.jsword.passage.VerseRange, from: BibleWindow?) =
+        openInLinks(Page.Memorize(book, range), from)
+
+    /** Shows [key] (any versification) in the active Bible window, or the first Bible window (reading plans etc.). */
+    fun openPassage(key: org.crosswire.jsword.passage.Key) {
+        val passage = key as? org.crosswire.jsword.passage.Passage ?: return
+        if (passage.countRanges(org.crosswire.jsword.passage.RestrictionType.NONE) == 0) return
+        val w = activeWindow?.takeIf { it.page is Page.Bible } ?: windows.firstOrNull { it.page is Page.Bible } ?: activeWindow ?: return
+        val bible = (w.page as? Page.Bible)?.book ?: Sword.bibles.firstOrNull() ?: run { toast("No Bible installed"); return }
+        val first = passage.getRangeAt(0, org.crosswire.jsword.passage.RestrictionType.NONE)
+        val last = passage.getRangeAt(passage.countRanges(org.crosswire.jsword.passage.RestrictionType.NONE) - 1,
+            org.crosswire.jsword.passage.RestrictionType.NONE)
+        val v11n = bible.versification
+        val range = org.crosswire.jsword.passage.VerseRange(v11n, first.start.toV11n(v11n), last.end.toV11n(v11n))
+        val start = if (range.start.verse == 0) Verse(v11n, range.start.book, range.start.chapter, 1) else range.start
+        val wholeChapter = range.start.verse <= 1 && range.end.verse == v11n.getLastVerse(range.end.book, range.end.chapter)
+        val page = Page.Bible(bible, start, if (wholeChapter) null else range)
+        setActive(w)
+        navigate(w, page)
+        verseChanged(w, start)
+    }
+
     private fun changeDocument(book: Book) {
         val w = activeWindow ?: return
         val p = w.page
@@ -597,6 +797,7 @@ class MainApp : Application() {
 
     private fun booksChanged() {
         Content.clearCache()
+        Addons.reload()
         updateToolbar()
         if (windows.size == 1 && windows[0].page is Page.Message) {
             val page = Page.defaultBible()
@@ -841,7 +1042,7 @@ class MainApp : Application() {
 }
 
 object BuildInfo {
-    val VERSION: String = MainApp::class.java.`package`?.implementationVersion ?: "0.1.0"
+    val VERSION: String = MainApp::class.java.`package`?.implementationVersion ?: "0.2.0"
 }
 
 fun main(args: Array<String>) {
@@ -849,6 +1050,7 @@ fun main(args: Array<String>) {
     Settings.load()
     HiDpi.apply()
     Sword.init()
+    OtherFormats.registerAll()
     Bookmarks.load()
     AssetServer.start()
     Application.launch(MainApp::class.java, *args)

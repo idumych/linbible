@@ -20,7 +20,9 @@ desktop shell:
 | `BibleView.kt` document loading / infinite scroll   | `BibleWindow.kt`                                     |
 | `ClientPageObjects.kt` (JSON documents)             | `Documents.kt`                                       |
 | `SwordContentFacade` (OSIS + BVA anchors)           | `Content.kt` (anchor logic ported verbatim)          |
-| Room bookmark database                              | `Bookmarks.kt` (JSON file, same data model)          |
+| Room databases (bookmarks, plans, AI, progress…)    | `Db.kt` + `MiniRoom.kt`: identical SQLite schemas, upstream migrations and DAOs |
+| Cloud sync (Google Drive / Nextcloud)               | `CloudSync.kt`: same sync protocol, WebDAV only      |
+| AI assistant (`net.bible.service.llm`)              | upstream code compiled as is, JavaFX UI in `Ai.kt`   |
 | `LinkControl` / `UriAnalyzer`                       | `Links.kt`                                           |
 | Activities (download, search, labels, settings)     | JavaFX dialogs                                       |
 
@@ -41,15 +43,36 @@ The only change to the upstream frontend is applied at build time by `scripts/bu
 - Downloading documents from the same repositories as AndBible (AndBible, CrossWire, eBible, Lockman,
   Wycliffe, IBT, STEP Bible, Crosswire Beta)
 - Copy verses with reference; text-to-speech via `spd-say`/`espeak-ng` if installed
+- **Reading plans**, including the plans shipped with AndBible and plans from add-ons (Navigate → Reading plan)
+- **Reading progress** per book and chapter, and **memorize mode** for verses (Navigate → Reading progress,
+  context menu → Memorize)
+- **EPUB**, **MyBible**, **MySword** and **e-Sword** documents (Library → Install from file…), including EPUB
+  table of contents and full-text search
+- AndBible **add-ons**: fonts, background images, reading plans and AI prompt packs (signature-checked)
+- **Backup & restore** in AndBible's format, so backups move between AndBible and LinBible in both directions
+  (Library → Backup & restore)
+- **Cloud sync** with Nextcloud or any WebDAV server, compatible with AndBible's Nextcloud sync, so phone and desktop
+  share bookmarks, StudyPads, AI settings and reading progress (Library → Cloud sync). Google Drive sync is not
+  available, because it relies on Google Play services.
+- **AI assistant** with AndBible's prompts and agent tools: any OpenAI-compatible provider (OpenAI, OpenRouter,
+  Ollama, …), Anthropic or Gemini; explains passages, writes StudyPads and bookmarks, shows its work in a log panel
+  and asks before changing anything (AI menu, or "Ask AI" in the verse context menu). API keys are stored in the
+  desktop keyring through `secret-tool` when available.
 
-Not ported (yet): AI features, reading plans, memorize mode, reading progress, EPUB / MyBible / MySword
-documents, cloud sync, and AndBible add-on fonts and styles.
+Not ported: workspaces (LinBible has a single set of windows) and AndBible's Android-only features (widgets,
+notifications, Bluetooth headset controls).
 
 ## Data locations
 
 - `~/.sword` holds SWORD modules. This is the standard location, so they are shared with Xiphos, BibleTime, etc.
-- `~/.local/share/linbible` holds bookmarks (`bookmarks.json`) and search indexes.
-- `~/.config/linbible/state.json` holds open windows and display settings.
+  Documents in other formats and add-ons go into subfolders of it (`epub`, `mybible`, `mysword`, `esword`, `ttf`,
+  `background`, `prompts`).
+- `~/.local/share/linbible/databases` holds the AndBible-format databases (bookmarks, reading plans, progress, AI
+  settings and AI documents); `~/.local/share/linbible` also holds search indexes.
+- `~/.config/linbible/state.json` holds open windows and display settings; `device-id` identifies this computer
+  for cloud sync. Secrets go to `secrets.properties` (mode 600) only if no keyring is available.
+
+Bookmarks from LinBible 0.1 (`bookmarks.json`) are imported on first start.
 
 ## HiDPI
 

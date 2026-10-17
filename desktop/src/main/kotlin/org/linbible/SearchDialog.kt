@@ -32,13 +32,13 @@ import org.crosswire.jsword.passage.Verse
 class SearchDialog private constructor(private val app: MainApp) {
     private val stage = Stage()
     private val query = TextField()
-    private val bible = ComboBox<SwordBook>()
+    private val bible = ComboBox<Book>()
     private val type = ComboBox<SearchType>()
     private val section = ComboBox<String>()
     private val status = Label()
     private val spinner = ProgressIndicator().apply { setPrefSize(18.0, 18.0); isVisible = false }
 
-    data class Hit(val key: Key, val reference: String, val text: String)
+    data class Hit(val key: Key, val reference: String, val text: String, val ordinal: Int? = null)
 
     private val table = TableView<Hit>()
 
@@ -49,8 +49,8 @@ class SearchDialog private constructor(private val app: MainApp) {
         query.setOnAction { search() }
         HBox.setHgrow(query, Priority.ALWAYS)
 
-        bible.converter = object : StringConverter<SwordBook>() {
-            override fun toString(b: SwordBook?) = b?.initials ?: ""
+        bible.converter = object : StringConverter<Book>() {
+            override fun toString(b: Book?) = b?.let { if (Epub.isEpub(it)) it.name else it.initials } ?: ""
             override fun fromString(s: String?) = null
         }
         type.items.setAll(SearchType.ALL_WORDS, SearchType.ANY_WORDS, SearchType.PHRASE)
@@ -64,6 +64,7 @@ class SearchDialog private constructor(private val app: MainApp) {
         section.items.setAll("Whole Bible", "Old Testament", "New Testament", "Current book")
         section.value = "Whole Bible"
 
+        bible.valueProperty().addListener { _, _, b -> val epub = Epub.isEpub(b); type.isDisable = epub; section.isDisable = epub }
         val go = Button("Search").apply { isDefaultButton = true; setOnAction { search() } }
         val top = HBox(8.0, query, bible, type, section, go).apply { alignment = Pos.CENTER_LEFT; padding = Insets(0.0, 0.0, 8.0, 0.0) }
 
@@ -90,14 +91,20 @@ class SearchDialog private constructor(private val app: MainApp) {
     }
 
     private fun refreshBibles() {
-        bible.items.setAll(Sword.bibles)
-        val current = app.activeWindow?.page?.book as? SwordBook
-        bible.value = bible.items.firstOrNull { it == current && it.bookCategory == org.crosswire.jsword.book.BookCategory.BIBLE }
+        // Bibles, and EPUB books (searched with their own full text index, like AndBible's EpubSearch)
+        bible.items.setAll(Sword.bibles + Sword.installed.filter { Epub.isEpub(it) }.sortedBy { it.name })
+        val current = app.activeWindow?.page?.book
+        bible.value = bible.items.firstOrNull { it == current && (it.bookCategory == org.crosswire.jsword.book.BookCategory.BIBLE || Epub.isEpub(it)) }
             ?: bible.value?.takeIf { it in bible.items } ?: bible.items.firstOrNull()
     }
 
     private fun open(hit: Hit) {
-        val b = bible.value ?: return
+        val book = bible.value ?: return
+        if (Epub.isEpub(book)) {
+            app.activeWindow?.let { w -> app.navigate(w, Page.Keyed(book, hit.key, hit.ordinal?.let { it..it })) }
+            return
+        }
+        val b = book as? SwordBook ?: return
         val v = when (val k = hit.key) {
             is Verse -> k
             else -> Page.parseVerse(b.versification, k.osisRef) ?: return
@@ -109,6 +116,7 @@ class SearchDialog private constructor(private val app: MainApp) {
         val book = bible.value ?: run { status.text = "No Bible installed"; return }
         val text = query.text.trim()
         if (text.isEmpty()) return
+        Epub.state(book)?.let { st -> searchEpub(book, st, text); return }
         if (!IndexManagerFactory.getIndexManager().isIndexed(book)) {
             if (app.ask("Search index needed", "${book.initials} has no search index yet. Build it now? This takes a minute or two.")) {
                 spinner.isVisible = true
@@ -149,6 +157,25 @@ class SearchDialog private constructor(private val app: MainApp) {
         }
     }
 
+    private fun searchEpub(book: Book, st: EpubState, text: String) {
+        spinner.isVisible = true
+        status.text = if (st.isIndexed) "Searching…" else "Building search index for ${book.name}…"
+        app.executor.submit {
+            try {
+                st.buildSearchIndex()
+                val hits = st.search(text).take(2000).map { Hit(it.key, it.key.name, it.text.replace(Regex("<[^>]+>"), ""), it.ordinal) }
+                Platform.runLater {
+                    spinner.isVisible = false
+                    table.items.setAll(hits)
+                    status.text = "${hits.size} results"
+                }
+            } catch (e: Exception) {
+                Log.e("EPUB search failed", e)
+                Platform.runLater { spinner.isVisible = false; status.text = "Search failed: ${e.message}" }
+            }
+        }
+    }
+
     companion object {
         private var instance: SearchDialog? = null
 
@@ -169,7 +196,8 @@ class SearchDialog private constructor(private val app: MainApp) {
             app.toast("Building search index for ${book.initials}…")
             app.executor.submit {
                 try {
-                    IndexManagerFactory.getIndexManager().scheduleIndexCreation(book)
+                    val epub = Epub.state(book)
+                if (epub != null) epub.buildSearchIndex() else IndexManagerFactory.getIndexManager().scheduleIndexCreation(book)
                 } catch (e: Throwable) {
                     Log.e("Indexing failed", e)
                 }
