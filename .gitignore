@@ -1,0 +1,9 @@
+/upstream/
+/tools/
+/build/
+/build-frontend/
+/desktop/build/
+/desktop/.gradle/
+/desktop/.kotlin/
+*.AppImage
+hs_err_pid*.log

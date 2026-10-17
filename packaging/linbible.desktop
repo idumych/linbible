@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=LinBible
+GenericName=Bible Study
+Comment=Offline Bible study — a desktop port of AndBible
+Exec=linbible %U
+Icon=linbible
+Terminal=false
+Categories=Education;Literature;
+Keywords=Bible;SWORD;Scripture;Study;Commentary;Strong's;
+StartupWMClass=org.linbible.MainApp

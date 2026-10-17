@@ -1,0 +1,69 @@
+.root {
+    -fx-font-size: 13px;
+}
+
+.window-header {
+    -fx-background-color: #e8e8ec;
+    -fx-border-color: transparent transparent #c8c8d0 transparent;
+}
+
+.window-header:active {
+    -fx-background-color: #cfdcf7;
+}
+
+.window-title {
+    -fx-font-weight: bold;
+}
+
+.links-title {
+    -fx-font-style: italic;
+}
+
+.window-close {
+    -fx-background-color: transparent;
+    -fx-padding: 0 4 0 4;
+}
+
+.window-close:hover {
+    -fx-background-color: rgba(0, 0, 0, 0.12);
+}
+
+.status-bar {
+    -fx-border-color: #c8c8d0 transparent transparent transparent;
+}
+
+/* ---------- night mode ---------- */
+
+.root.dark {
+    -fx-base: #2b2b2e;
+    -fx-background: #1e1e20;
+    -fx-control-inner-background: #252528;
+    -fx-control-inner-background-alt: #2c2c30;
+    -fx-accent: #4a78c2;
+    -fx-focus-color: #4a78c2;
+    -fx-faint-focus-color: #4a78c222;
+    -fx-text-base-color: #e3e3e3;
+    -fx-text-background-color: #e3e3e3;
+    -fx-selection-bar-non-focused: #3a3a40;
+}
+
+.root.dark .window-header {
+    -fx-background-color: #2a2a2e;
+    -fx-border-color: transparent transparent #3a3a40 transparent;
+}
+
+.root.dark .window-header:active {
+    -fx-background-color: #2d3e5c;
+}
+
+.root.dark .window-close:hover {
+    -fx-background-color: rgba(255, 255, 255, 0.15);
+}
+
+.root.dark .status-bar {
+    -fx-border-color: #3a3a40 transparent transparent transparent;
+}
+
+.root.dark .text-field {
+    -fx-prompt-text-fill: #8a8a90;
+}

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3f6fbf"/>
+      <stop offset="1" stop-color="#27477f"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#bg)"/>
+  <!-- open book -->
+  <path d="M128 78 C104 62 70 60 44 66 L44 188 C70 182 104 184 128 200 Z" fill="#fdfaf2"/>
+  <path d="M128 78 C152 62 186 60 212 66 L212 188 C186 182 152 184 128 200 Z" fill="#f1ead8"/>
+  <path d="M128 78 L128 200" stroke="#27477f" stroke-width="4"/>
+  <g stroke="#9aa9c4" stroke-width="5" stroke-linecap="round">
+    <line x1="62" y1="96" x2="110" y2="102"/>
+    <line x1="62" y1="116" x2="110" y2="122"/>
+    <line x1="62" y1="136" x2="110" y2="142"/>
+    <line x1="62" y1="156" x2="100" y2="161"/>
+    <line x1="146" y1="102" x2="194" y2="96"/>
+    <line x1="146" y1="122" x2="194" y2="116"/>
+    <line x1="146" y1="142" x2="194" y2="136"/>
+  </g>
+  <!-- ribbon -->
+  <path d="M170 64 L170 112 L180 102 L190 112 L190 62 Z" fill="#d9534f"/>
+</svg>

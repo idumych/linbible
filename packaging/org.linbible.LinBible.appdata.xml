@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.linbible.LinBible</id>
+  <name>LinBible</name>
+  <summary>Offline Bible study — a desktop port of AndBible</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <description>
+    <p>
+      LinBible brings AndBible's Bible study features to the Linux desktop: Bibles, commentaries,
+      dictionaries and general books in the SWORD format, Strong's numbers and morphology,
+      cross references, split windows that follow each other, bookmarks with labels, notes and StudyPads,
+      full text search, and downloading documents from the CrossWire, AndBible, eBible, STEP and other repositories.
+    </p>
+  </description>
+  <launchable type="desktop-id">linbible.desktop</launchable>
+  <url type="homepage">https://github.com/AndBible/and-bible</url>
+  <releases>
+    <release version="@VERSION@"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>
