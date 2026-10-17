@@ -7,3 +7,4 @@
 /desktop/.kotlin/
 *.AppImage
 hs_err_pid*.log
+*.AppImage.sha256
