@@ -106,4 +106,4 @@ extra JVM options to the AppImage launcher.
 
 ## License
 
-GPL-3.0-or-later, the same as AndBible and JSword.
+GPL-3.0-or-later, the same as AndBible and JSword. See [LICENSE](LICENSE).
